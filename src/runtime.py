@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 from collections import deque
 import io
 from pathlib import Path
@@ -47,6 +48,9 @@ class AsrAdapterRuntimeMixin:
         self._toggle_active = False
         self._toggle_key_was_pressed = False
         self._playback_until = 0.0
+        self._queued_playback_until = 0.0
+        self._playback_queue: asyncio.Queue[tuple[bytes, AsrAdapterConfig]] = asyncio.Queue()
+        self._playback_worker_task: asyncio.Task[None] | None = None
         self._preroll_chunks: deque[Any] = deque()
         self._provider: ASRProvider | None = None
 
@@ -110,6 +114,13 @@ class AsrAdapterRuntimeMixin:
         self._toggle_active = False
         self._toggle_key_was_pressed = False
         self._playback_until = 0.0
+        self._queued_playback_until = 0.0
+        if self._playback_worker_task is not None:
+            self._playback_worker_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._playback_worker_task
+            self._playback_worker_task = None
+        self._playback_queue = asyncio.Queue()
         self._preroll_chunks.clear()
         self._provider = None
         logger.info("ASR 适配器已关闭")
@@ -305,6 +316,42 @@ class AsrAdapterRuntimeMixin:
     ) -> None:
         """使用 sounddevice 播放 WAV 或 float32 PCM 音频。"""
 
+        if config.playback.blocking:
+            await self._play_audio_bytes_now(audio_data, config)
+            return
+
+        duration = self._estimate_audio_duration_from_bytes(audio_data, config)
+        now = time.monotonic()
+        self._queued_playback_until = max(self._queued_playback_until, now) + duration + 0.3
+        self._playback_until = max(self._playback_until, self._queued_playback_until)
+        await self._playback_queue.put((audio_data, config))
+        self._ensure_playback_worker()
+
+    def _ensure_playback_worker(self) -> None:
+        if self._playback_worker_task is not None and not self._playback_worker_task.done():
+            return
+        self._playback_worker_task = asyncio.create_task(
+            self._playback_worker(),
+            name="asr_playback_worker",
+        )
+
+    async def _playback_worker(self) -> None:
+        while True:
+            audio_data, config = await self._playback_queue.get()
+            try:
+                await self._play_audio_bytes_now(audio_data, config)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"ASR 播放后台任务异常: {exc}", exc_info=True)
+            finally:
+                self._playback_queue.task_done()
+
+    async def _play_audio_bytes_now(
+        self,
+        audio_data: bytes,
+        config: AsrAdapterConfig,
+    ) -> None:
         try:
             import sounddevice as sd
         except ImportError as exc:
@@ -314,13 +361,60 @@ class AsrAdapterRuntimeMixin:
         if samples.size == 0:
             return
 
+        samples = self._prepare_playback_samples(samples, config)
         device = self._normalize_output_device(config.playback.output_device)
         duration = self._estimate_audio_duration(samples, sample_rate)
         self._playback_until = max(self._playback_until, time.monotonic() + duration + 0.3)
-        sd.play(samples, samplerate=sample_rate, device=device)
-        if config.playback.blocking:
-            sd.wait()
-            self._playback_until = max(self._playback_until, time.monotonic() + 0.3)
+        await asyncio.to_thread(
+            self._play_samples_sync,
+            sd,
+            samples,
+            sample_rate,
+            device,
+        )
+        self._playback_until = max(self._playback_until, time.monotonic() + 0.3)
+        if self._playback_queue.empty():
+            self._queued_playback_until = self._playback_until
+
+    @staticmethod
+    def _play_samples_sync(
+        sounddevice_module: Any,
+        samples: Any,
+        sample_rate: int,
+        device: str | int | None,
+    ) -> None:
+        sounddevice_module.play(samples, samplerate=sample_rate, device=device)
+        sounddevice_module.wait()
+
+    @staticmethod
+    def _prepare_playback_samples(samples: Any, config: AsrAdapterConfig) -> Any:
+        if not bool(getattr(config.playback, "duplicate_mono_to_stereo", True)):
+            return samples
+
+        ndim = getattr(samples, "ndim", None)
+        shape = getattr(samples, "shape", None)
+
+        # Duplicate mono samples into L/R channels so stereo outputs do not
+        # collapse playback to a single side on some devices.
+        if ndim == 1:
+            import numpy as np
+
+            return np.column_stack((samples, samples))
+        if ndim == 2 and isinstance(shape, tuple) and len(shape) >= 2 and shape[1] == 1:
+            import numpy as np
+
+            return np.repeat(samples, 2, axis=1)
+        return samples
+
+    def _estimate_audio_duration_from_bytes(
+        self,
+        audio_data: bytes,
+        config: AsrAdapterConfig,
+    ) -> float:
+        samples, sample_rate = self._decode_audio_samples(audio_data, config)
+        if getattr(samples, "size", 0) == 0:
+            return 0.0
+        return self._estimate_audio_duration(samples, sample_rate)
 
     @staticmethod
     def _estimate_audio_duration(samples: Any, sample_rate: int) -> float:

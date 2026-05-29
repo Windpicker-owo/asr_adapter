@@ -267,6 +267,12 @@ class AsrAdapterConfig(BaseConfig):
             label="阻塞播放",
             tag="performance",
         )
+        duplicate_mono_to_stereo: bool = Field(
+            default=True,
+            description="播放单声道音频时是否复制到左右两个声道，避免部分声卡只在左声道播放",
+            label="单声道复制到立体声",
+            tag="performance",
+        )
         fallback_sample_rate: int = Field(
             default=24000,
             description="非 WAV 原始 PCM 数据的回退采样率",
