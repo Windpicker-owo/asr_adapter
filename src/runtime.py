@@ -17,6 +17,7 @@ from mofox_wire import MessageEnvelope
 
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.api.service_api import get_service
+from src.core.utils.message_format import build_format_info
 
 from ..config import AsrAdapterConfig
 from ..protocol import ASRAudioSource, ASRProvider, ASRRecognizer
@@ -24,6 +25,8 @@ from ..service import ASRProviderRegistryService
 from .text_quality import is_likely_normal_utterance
 
 logger = get_logger("asr_adapter")
+
+LOCAL_ASR_ACCEPT_FORMAT = ["voice"]
 
 
 class AsrAdapterRuntimeMixin:
@@ -801,16 +804,250 @@ class AsrAdapterRuntimeMixin:
 
         return max_run >= 6 and max_run * 2 >= len(content) and len(set(content)) <= 3
 
+    @staticmethod
+    def _configured_injection_platform(config: AsrAdapterConfig) -> str | None:
+        platform = str(getattr(config.message, "inject_stream_platform", "") or "").strip()
+        return platform or None
+
+    @staticmethod
+    def _has_active_bilibili_live_adapter_context() -> bool:
+        from src.core.managers.adapter_manager import get_adapter_manager
+
+        adapter_manager = get_adapter_manager()
+        for adapter in adapter_manager.get_all_adapters().values():
+            if getattr(adapter, "platform", "") != "bilibili_live":
+                continue
+            start_resp = getattr(adapter, "_start_resp", None)
+            room_id = str(getattr(start_resp, "anchor_room_id", "") or "").strip()
+            if room_id:
+                return True
+        return False
+
+    def _preferred_injection_platform(self, config: AsrAdapterConfig) -> str | None:
+        configured_platform = self._configured_injection_platform(config)
+        if configured_platform is not None:
+            return configured_platform
+
+        if self.platform == "local_asr" and self._has_active_bilibili_live_adapter_context():
+            return "bilibili_live"
+
+        return None
+
+    async def _resolve_bilibili_live_stream_from_adapter(
+        self,
+        sm: Any,
+        *,
+        target_platform: str,
+        explicit_stream_id: str,
+        explicit_group_name: str,
+    ) -> Any | None:
+        from src.core.managers.adapter_manager import get_adapter_manager
+        from src.core.models.stream import ChatStream
+
+        adapter_manager = get_adapter_manager()
+        for adapter in adapter_manager.get_all_adapters().values():
+            if getattr(adapter, "platform", "") != target_platform:
+                continue
+
+            start_resp = getattr(adapter, "_start_resp", None)
+            room_id = str(getattr(start_resp, "anchor_room_id", "") or "").strip()
+            if not room_id:
+                continue
+
+            room_name = str(getattr(start_resp, "anchor_uname", "") or "").strip()
+            derived_stream_id = explicit_stream_id or ChatStream.generate_stream_id(
+                target_platform,
+                group_id=room_id,
+            )
+            stream = await sm.activate_stream(derived_stream_id)
+            if stream is not None:
+                return stream
+
+            return await sm.get_or_create_stream(
+                stream_id=derived_stream_id,
+                platform=target_platform,
+                group_id=room_id,
+                group_name=explicit_group_name or room_name or f"{target_platform}:{room_id}",
+                chat_type="group",
+            )
+
+        return None
+
+    async def _resolve_target_chat_stream(
+        self,
+        config: AsrAdapterConfig,
+        target_platform: str,
+    ) -> Any | None:
+        from src.core.managers.stream_manager import get_stream_manager
+        from src.core.models.stream import ChatStream
+
+        sm = get_stream_manager()
+        explicit_stream_id = str(getattr(config.message, "inject_stream_id", "") or "").strip()
+        explicit_group_id = str(getattr(config.message, "inject_stream_group_id", "") or "").strip()
+        explicit_group_name = str(
+            getattr(config.message, "inject_stream_group_name", "") or ""
+        ).strip()
+
+        if explicit_group_id:
+            derived_stream_id = explicit_stream_id or ChatStream.generate_stream_id(
+                target_platform,
+                group_id=explicit_group_id,
+            )
+            stream = await sm.activate_stream(derived_stream_id)
+            if stream is not None:
+                return stream
+            return await sm.get_or_create_stream(
+                stream_id=derived_stream_id,
+                platform=target_platform,
+                group_id=explicit_group_id,
+                group_name=explicit_group_name or f"{target_platform}:{explicit_group_id}",
+                chat_type="group",
+            )
+
+        if explicit_stream_id:
+            stream = await sm.activate_stream(explicit_stream_id)
+            if stream is not None:
+                return stream
+            return await sm.get_or_create_stream(
+                stream_id=explicit_stream_id,
+                platform=target_platform,
+                chat_type="group" if target_platform == "bilibili_live" else "private",
+                group_name=explicit_group_name,
+            )
+
+        if target_platform == "bilibili_live":
+            stream = await self._resolve_bilibili_live_stream_from_adapter(
+                sm,
+                target_platform=target_platform,
+                explicit_stream_id=explicit_stream_id,
+                explicit_group_name=explicit_group_name,
+            )
+            if stream is not None:
+                return stream
+
+        candidates = [
+            stream
+            for stream in sm._streams.values()
+            if getattr(stream, "platform", "") == target_platform
+        ]
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda stream: getattr(stream, "last_active_time", 0.0),
+            reverse=True,
+        )
+        if len(candidates) > 1:
+            logger.warning(
+                "Multiple target streams match ASR direct injection; using the most recently active one."
+            )
+        return candidates[0]
+
+    async def _inject_text_into_target_stream(
+        self,
+        text: str,
+        *,
+        config: AsrAdapterConfig,
+        is_final: bool,
+        target_platform: str | None = None,
+    ) -> bool:
+        target_platform = target_platform or self._preferred_injection_platform(config)
+        if target_platform is None:
+            return False
+
+        chat_stream = await self._resolve_target_chat_stream(config, target_platform)
+        if chat_stream is None:
+            logger.warning(
+                "ASR direct stream injection is enabled but no target stream could be resolved; falling back to core sink."
+            )
+            return False
+
+        from src.core.managers.stream_manager import get_stream_manager
+        from src.core.models.message import Message, MessageType
+        from src.core.transport.distribution.stream_loop_manager import (
+            get_stream_loop_manager,
+        )
+        from src.core.utils.user_query_helper import get_user_query_helper
+
+        now = time.time()
+        raw_message = {
+            "text": text,
+            "source": "microphone",
+            "engine": "funasr",
+            "is_final": is_final,
+            "injected_platform": target_platform,
+        }
+        format_info = build_format_info(
+            content_format=["text"],
+            accept_format=LOCAL_ASR_ACCEPT_FORMAT,
+        )
+        message = Message(
+            message_id=f"asr-{uuid.uuid4()}",
+            time=now,
+            content=text,
+            processed_plain_text=text,
+            message_type=MessageType.TEXT,
+            sender_id=config.bot.speaker_id,
+            sender_name=config.bot.speaker_name,
+            sender_cardname=config.bot.speaker_name,
+            platform=chat_stream.platform,
+            chat_type=chat_stream.chat_type,
+            stream_id=chat_stream.stream_id,
+            raw_data=raw_message,
+            asr={
+                "engine": "funasr",
+                "is_final": is_final,
+                "source_platform": self.platform,
+            },
+            format_info=format_info,
+        )
+
+        await get_user_query_helper().update_person_info(
+            platform=message.platform,
+            user_id=message.sender_id,
+            nickname=message.sender_name,
+            cardname=message.sender_cardname,
+        )
+
+        sm = get_stream_manager()
+        await sm.add_message(message)
+
+        context = chat_stream.context
+        context.last_message_time = now
+
+        slm = get_stream_loop_manager()
+        if slm.is_running and not (
+            context.stream_loop_task and not context.stream_loop_task.done()
+        ):
+            await slm.start_stream_loop(chat_stream.stream_id)
+
+        logger.debug(
+            "Injected ASR text directly into stream "
+            f"platform={chat_stream.platform}, stream_id={chat_stream.stream_id[:8]}, text={text}"
+        )
+        return True
+
     async def _send_text_to_core(self, text: str, *, is_final: bool) -> None:
-        """将识别文本封装为标准 incoming 文本消息并发送到核心。"""
+        """??????????????? incoming ?????????????????"""
 
         text = text.strip()
-        if not text or not self.core_sink:
+        if not text:
             return
         if not self.plugin or not self.plugin.config:
             return
 
         config = cast(AsrAdapterConfig, self.plugin.config)
+        preferred_platform = self._preferred_injection_platform(config)
+        if await self._inject_text_into_target_stream(
+            text,
+            config=config,
+            is_final=is_final,
+            target_platform=preferred_platform,
+        ):
+            return
+        if not self.core_sink:
+            return
+
         envelope = {
             "direction": "incoming",
             "message_info": {
@@ -827,7 +1064,11 @@ class AsrAdapterRuntimeMixin:
                     "asr": {
                         "engine": "funasr",
                         "is_final": is_final,
-                    }
+                    },
+                    "format_info": build_format_info(
+                        content_format=["text"],
+                        accept_format=LOCAL_ASR_ACCEPT_FORMAT,
+                    ),
                 },
             },
             "message_segment": [{"type": "text", "data": text}],

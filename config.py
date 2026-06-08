@@ -1,4 +1,4 @@
-"""原生 FunASR 实时语音识别适配器配置。"""
+"""Configuration for the local ASR adapter."""
 
 from __future__ import annotations
 
@@ -8,196 +8,183 @@ from src.core.components.base.config import BaseConfig, Field, SectionBase, conf
 
 
 class AsrAdapterConfig(BaseConfig):
-    """ASR 适配器配置。"""
+    """Runtime configuration for microphone ASR and local playback."""
 
     config_name: ClassVar[str] = "config"
-    config_description: ClassVar[str] = "ASR 实时语音识别适配器配置"
+    config_description: ClassVar[str] = "Configuration for the ASR adapter"
 
-    @config_section("plugin", title="插件设置", tag="plugin")
+    @config_section("plugin", title="Plugin", tag="plugin")
     class PluginSection(SectionBase):
-        """插件基本配置。"""
-
         enabled: bool = Field(
             default=True,
-            description="是否启用 ASR 适配器",
-            label="启用适配器",
+            description="Whether the ASR adapter is enabled.",
+            label="Enabled",
             tag="plugin",
         )
         config_version: str = Field(
             default="1.0.0",
-            description="配置文件版本",
-            label="配置版本",
+            description="Configuration file version.",
+            label="Config Version",
             disabled=True,
             tag="general",
         )
 
-    @config_section("bot", title="说话人配置", tag="user")
+    @config_section("bot", title="Speaker Identity", tag="user")
     class BotSection(SectionBase):
-        """本地语音输入与外发 Bot 身份配置。"""
-
         bot_id: str = Field(
             default="local_asr_bot",
-            description="核心外发消息写入历史时使用的 Bot ID",
+            description="Bot id used when writing outgoing messages into history.",
             label="Bot ID",
             tag="user",
         )
         bot_name: str = Field(
             default="MoFox",
-            description="核心外发消息写入历史时使用的 Bot 名称",
-            label="Bot 名称",
+            description="Bot display name used when writing outgoing messages into history.",
+            label="Bot Name",
             tag="user",
         )
-
         speaker_id: str = Field(
             default="local_microphone",
-            description="注入核心消息时使用的本地说话人 ID",
-            label="说话人 ID",
+            description="Speaker id used for recognized microphone input.",
+            label="Speaker ID",
             tag="user",
         )
         speaker_name: str = Field(
             default="Local Microphone",
-            description="注入核心消息时使用的本地说话人名称",
-            label="说话人名称",
+            description="Speaker display name used for recognized microphone input.",
+            label="Speaker Name",
             tag="user",
         )
 
-    @config_section("audio", title="音频采集", tag="performance")
+    @config_section("audio", title="Audio Capture", tag="performance")
     class AudioSection(SectionBase):
-        """麦克风音频采集配置。"""
-
         sample_rate: int = Field(
             default=16000,
-            description="麦克风采样率，需与模型期望采样率一致",
-            label="采样率",
+            description="Microphone sample rate.",
+            label="Sample Rate",
             ge=8000,
             le=48000,
             tag="performance",
         )
         channels: int = Field(
             default=1,
-            description="输入通道数，当前适配器会转换为单声道",
-            label="通道数",
+            description="Input channel count. The adapter will convert to mono when needed.",
+            label="Channels",
             ge=1,
             le=2,
             tag="performance",
         )
         device: str = Field(
             default="",
-            description="sounddevice 输入设备名称或索引，留空使用系统默认输入设备",
-            label="输入设备",
+            description="sounddevice input device name or index. Leave empty for the system default input.",
+            label="Input Device",
             tag="performance",
         )
         block_size: int = Field(
             default=8000,
-            description="每次音频回调的采样点数，8000 约等于 500ms@16kHz",
-            label="块大小",
+            description="Samples per capture block.",
+            label="Block Size",
             ge=160,
             le=16000,
             tag="performance",
         )
         queue_max_chunks: int = Field(
             default=80,
-            description="音频队列最大块数，满时丢弃旧块以保持实时性",
-            label="队列大小",
+            description="Maximum buffered audio blocks before old chunks are dropped.",
+            label="Queue Size",
             ge=1,
             le=200,
             tag="performance",
         )
 
-    @config_section("activation", title="监听激活", tag="performance")
+    @config_section("activation", title="Activation", tag="performance")
     class ActivationSection(SectionBase):
-        """麦克风监听激活方式配置。"""
-
         mode: str = Field(
             default="vad",
-            description="监听激活方式：vad 自动按音量激活，push_to_talk 按住热键激活，toggle_key 按键切换激活状态",
-            label="激活方式",
+            description="Activation mode: vad, push_to_talk, toggle_key, or always_on.",
+            label="Mode",
             input_type="select",
             choices=["vad", "push_to_talk", "toggle_key", "always_on"],
             tag="performance",
         )
         hotkey: str = Field(
             default="space",
-            description="按键激活使用的热键名称，支持 keyboard 库格式，如 space、ctrl+space、alt",
-            label="激活热键",
+            description="Hotkey used by push_to_talk or toggle_key modes.",
+            label="Hotkey",
             tag="performance",
         )
         vad_threshold: float = Field(
             default=0.003,
-            description="VAD 自动激活的 RMS 音量阈值，低于阈值且尚未进入语音段时不送入识别；0 表示关闭",
-            label="VAD 阈值",
+            description="RMS threshold used by VAD activation. Set to 0 to disable the threshold.",
+            label="VAD Threshold",
             ge=0.0,
             le=1.0,
             tag="performance",
         )
         toggle_initially_active: bool = Field(
             default=False,
-            description="toggle_key 模式启动时是否默认处于激活监听状态",
-            label="切换模式默认激活",
+            description="Whether toggle mode starts in the active state.",
+            label="Toggle Starts Active",
             tag="performance",
         )
         preroll_ms: int = Field(
             default=500,
-            description="VAD 触发后补送的前置音频时长，避免句首被截断",
-            label="前置音频(ms)",
+            description="Audio preroll kept before VAD activation to avoid clipping sentence starts.",
+            label="Preroll (ms)",
             ge=0,
             le=2000,
             tag="performance",
         )
 
-    @config_section("asr", title="识别模型", tag="ai")
+    @config_section("asr", title="Recognizer", tag="ai")
     class AsrSection(SectionBase):
-        """ASR provider 选择配置。"""
-
         provider: str = Field(
             default="funasr",
-            description="ASR provider 名称；asr_adapter 会从 provider registry 中查找，社区插件可注册自定义 provider",
+            description="ASR provider name resolved through the provider registry.",
             label="ASR Provider",
             tag="ai",
         )
 
-    @config_section("message", title="消息提交", tag="text")
+    @config_section("message", title="Message Injection", tag="text")
     class MessageSection(SectionBase):
-        """识别结果注入核心的策略。"""
-
         min_text_length: int = Field(
             default=2,
-            description="提交到核心的最短文本长度",
-            label="最短文本长度",
+            description="Minimum recognized text length before submission.",
+            label="Min Text Length",
             ge=1,
             le=100,
             tag="text",
         )
         commit_partial_results: bool = Field(
             default=False,
-            description="是否把流式 partial 结果也提交到核心，默认关闭以避免多轮触发",
-            label="提交中间结果",
+            description="Whether partial ASR results should also be submitted.",
+            label="Commit Partials",
             tag="text",
         )
         partial_emit_interval: float = Field(
             default=1.0,
-            description="中间结果最小提交间隔秒数",
-            label="中间结果间隔",
+            description="Minimum interval between partial result submissions.",
+            label="Partial Interval",
             ge=0.1,
             le=10.0,
             tag="text",
         )
         enable_quality_filter: bool = Field(
             default=False,
-            description="是否启用 ASR 文本质量过滤，明显不像正常中文语句的结果会被丢弃",
-            label="启用质量过滤",
+            description="Whether to filter obviously bad ASR text.",
+            label="Quality Filter",
             tag="text",
         )
         enable_confidence_filter: bool = Field(
             default=True,
-            description="是否启用 token 置信度过滤；FunASR AutoModel 无置信度数据时不会丢弃",
-            label="启用置信度过滤",
+            description="Whether to filter recognized text using token confidence.",
+            label="Confidence Filter",
             tag="text",
         )
         min_avg_confidence: float = Field(
             default=-0.6,
-            description="平均 token 置信度下限；后端未提供置信度时不会丢弃",
-            label="平均置信度下限",
+            description="Minimum average token confidence.",
+            label="Min Avg Confidence",
             ge=-20.0,
             le=1.0,
             tag="text",
@@ -206,8 +193,8 @@ class AsrAdapterConfig(BaseConfig):
         )
         min_token_confidence: float = Field(
             default=-3.0,
-            description="单 token 置信度下限；后端未提供置信度时不会丢弃；-20 表示基本关闭",
-            label="单 token 置信度下限",
+            description="Minimum per-token confidence. -20 is effectively disabled.",
+            label="Min Token Confidence",
             ge=-20.0,
             le=1.0,
             tag="text",
@@ -216,8 +203,8 @@ class AsrAdapterConfig(BaseConfig):
         )
         max_ascii_ratio: float = Field(
             default=0.2,
-            description="允许的英文字母占比上限，用于过滤混入异常英文 token 的结果",
-            label="英文字母占比上限",
+            description="Maximum ASCII letter ratio allowed by the quality filter.",
+            label="Max ASCII Ratio",
             ge=0.0,
             le=1.0,
             tag="text",
@@ -226,8 +213,8 @@ class AsrAdapterConfig(BaseConfig):
         )
         min_cjk_ratio: float = Field(
             default=0.65,
-            description="中文字符占比下限，用于过滤非中文或乱码结果",
-            label="中文占比下限",
+            description="Minimum CJK character ratio allowed by the quality filter.",
+            label="Min CJK Ratio",
             ge=0.0,
             le=1.0,
             tag="text",
@@ -236,47 +223,72 @@ class AsrAdapterConfig(BaseConfig):
         )
         min_common_cjk_ratio: float = Field(
             default=0.45,
-            description="常用汉字占比下限，用于过滤生僻字比例异常高的幻听结果",
-            label="常用汉字占比下限",
+            description="Minimum common CJK character ratio allowed by the quality filter.",
+            label="Min Common CJK Ratio",
             ge=0.0,
             le=1.0,
             tag="text",
             depends_on="enable_quality_filter",
             depends_value=True,
         )
+        inject_stream_platform: str = Field(
+            default="",
+            description="Optional target platform for direct stream injection, for example bilibili_live. If stream_id and group_id are blank, the runtime tries to auto-resolve the active target stream.",
+            label="Inject Platform",
+            tag="text",
+        )
+        inject_stream_id: str = Field(
+            default="",
+            description="Optional explicit target stream_id for direct stream injection.",
+            label="Inject Stream ID",
+            tag="text",
+            depends_on="inject_stream_platform",
+        )
+        inject_stream_group_id: str = Field(
+            default="",
+            description="Optional target group or room id used to derive the injected stream when stream_id is omitted. Leave blank to auto-resolve from the active adapter when supported.",
+            label="Inject Group ID",
+            tag="text",
+            depends_on="inject_stream_platform",
+        )
+        inject_stream_group_name: str = Field(
+            default="",
+            description="Optional display name used when creating a missing injected stream.",
+            label="Inject Group Name",
+            tag="text",
+            depends_on="inject_stream_platform",
+        )
 
-    @config_section("playback", title="语音播放", tag="performance")
+    @config_section("playback", title="Playback", tag="performance")
     class PlaybackSection(SectionBase):
-        """核心外发语音的本地播放配置。"""
-
         enabled: bool = Field(
             default=True,
-            description="是否播放核心发回的 voice/TTS 音频",
-            label="启用播放",
+            description="Whether outgoing voice/TTS messages should be played locally.",
+            label="Enable Playback",
             tag="performance",
         )
         output_device: str = Field(
             default="",
-            description="sounddevice 输出设备名称或索引，留空使用系统默认输出设备",
-            label="输出设备",
+            description="sounddevice output device name or index. Leave empty for the system default output.",
+            label="Output Device",
             tag="performance",
         )
         blocking: bool = Field(
             default=True,
-            description="播放时是否阻塞直到本段音频结束；开启后可保持多段语音顺序播放",
-            label="阻塞播放",
+            description="Whether local playback waits for each clip to finish before returning.",
+            label="Blocking Playback",
             tag="performance",
         )
         duplicate_mono_to_stereo: bool = Field(
             default=True,
-            description="播放单声道音频时是否复制到左右两个声道，避免部分声卡只在左声道播放",
-            label="单声道复制到立体声",
+            description="Whether mono audio should be duplicated into stereo before playback.",
+            label="Duplicate Mono To Stereo",
             tag="performance",
         )
         fallback_sample_rate: int = Field(
             default=24000,
-            description="非 WAV 原始 PCM 数据的回退采样率",
-            label="回退采样率",
+            description="Fallback sample rate for raw PCM audio that is not packaged as WAV.",
+            label="Fallback Sample Rate",
             ge=8000,
             le=48000,
             tag="performance",
@@ -289,3 +301,6 @@ class AsrAdapterConfig(BaseConfig):
     asr: AsrSection = Field(default_factory=AsrSection)
     message: MessageSection = Field(default_factory=MessageSection)
     playback: PlaybackSection = Field(default_factory=PlaybackSection)
+
+
+__all__ = ["AsrAdapterConfig"]
